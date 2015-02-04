@@ -297,7 +297,7 @@ class AAMAlgorithm(object):
 
 
     @abc.abstractmethod
-    def _precompute(self, **kwargs):
+    def precompute(self, **kwargs):
         pass
 
     @abc.abstractmethod
@@ -323,7 +323,7 @@ class ProjectOut(AAMAlgorithm):
         return j - self._masked_U.dot(self._pinv_U.T.dot(j))
 
 
-class Simultaneous(AAMAlgorithm):
+class Simultaneous2(AAMAlgorithm):
 
     def __init__(self, aam_interface, appearance_model, transform,
                  eps=10**-5, **kwargs):
@@ -383,13 +383,12 @@ class Bayesian(AAMAlgorithm):
 
 # Concrete implementations of AAM Algorithms  ---------------------------------
 
-# Project Out Compositional Algorithms ----------------------------------------
+# Project-out Compositional Algorithms ----------------------------------------
 
 class PIC(ProjectOut):
     r"""
-    Project-Out Inverse Compositional Gauss-Newton Algorithm
+    Project-Out Inverse Compositional Gauss-Newton algorithm
     """
-
     def _precompute(self):
 
         # compute model's gradient
@@ -439,10 +438,10 @@ class PIC(ProjectOut):
             shape_parameters.append(self.transform.as_vector())
 
             # test convergence
-            # error = np.abs(np.linalg.norm(
-            #     target.points - self.transform.target.points))
-            # if error < self.eps:
-            #     break
+            error = np.abs(np.linalg.norm(
+                target.points - self.transform.target.points))
+            if error < self.eps:
+                break
 
             # save cost
             cost.append(e.T.dot(self.project_out(e)))
@@ -452,11 +451,221 @@ class PIC(ProjectOut):
                                                gt_shape=gt_shape)
 
 
-class PICN(ProjectOut):
+class PFC(ProjectOut):
     r"""
-    Project-Out Inverse Compositional Newton Algorithm
+    Project-Out Forward Compositional Gauss-Newton algorithm
     """
+    def _precompute(self):
 
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # masked model mean
+        masked_m = self.appearance_model.mean().as_vector()[
+            self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # compute warped image with current weights
+            i = self.interface.warp(image)
+
+            # reconstruct appearance
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            # compute error image
+            e = masked_m - masked_i
+
+            # compute image gradient
+            nabla_i = self.interface.gradient(i)
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_i, self._dw_dp)
+            # project out appearance model from model jacobian
+            j_po = self.project_out(j)
+
+            # compute hessian
+            h = j_po.T.dot(j)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j_po, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            error = np.abs(np.linalg.norm(
+                target.points - self.transform.target.points))
+            if error < self.eps:
+                break
+
+            # save cost
+            cost.append(e.T.dot(self.project_out(e)))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(image, shape_parameters, cost,
+                                               gt_shape=gt_shape)
+
+
+class PAC(ProjectOut):
+    r"""
+    Project-Out Asymmetric Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute model gradient
+        self._nabla_t = self.interface.gradient(self.template)
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False, a=0.5):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # masked model mean
+        masked_m = self.appearance_model.mean().as_vector()[
+            self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # compute warped image with current weights
+            i = self.interface.warp(image)
+
+            # reconstruct appearance
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            # compute error image
+            e = masked_m - masked_i
+
+            # combine image and model gradient
+            nabla = a * self.interface.gradient(i) + (1-a) * self._nabla_t
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla, self._dw_dp)
+            # project out appearance model from model jacobian
+            j_po = self.project_out(j)
+
+            # compute hessian
+            h = j_po.T.dot(j)
+
+            # compute symmetric esm parameter updates
+            dp = self.interface.solve(h, j_po, e, prior)
+
+            # update transform
+            target = self.transform.target
+            dt = self.transform.from_vector(a * dp)
+            dt.from_vector_inplace(dt.as_vector() + (1-a) * dp)
+            self.transform.from_vector_inplace(
+                self.transform.as_vector() + dt.as_vector())
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            error = np.abs(np.linalg.norm(
+                target.points - self.transform.target.points))
+            if error < self.eps:
+                break
+
+            # save cost
+            cost.append(e.T.dot(self.project_out(e)))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(image, shape_parameters, cost,
+                                               gt_shape=gt_shape)
+
+
+class PBC(ProjectOut):
+    r"""
+    Project-Out Bidirectional Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute model gradient
+        self._nabla_t = self.interface.gradient(self.template)
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        n_shape_params = self.transform.n_parameters
+        # masked model mean
+        masked_m = self.appearance_model.mean().as_vector()[
+            self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # compute warped image with current weights
+            i = self.interface.warp(image)
+
+            # reconstruct appearance
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            # compute error image
+            e = masked_m - masked_i
+
+            # compute image gradient
+            nabla_i = self.interface.gradient(i)
+
+            # compute jacobian
+            j_i = self.interface.steepest_descent_images(nabla_i, self._dw_dp)
+            j_t = self.interface.steepest_descent_images(self._nabla_t,
+                                                         self._dw_dp)
+            j = np.hstack((j_i, j_t))
+            # project out appearance model from  jacobian
+            j_po = self.project_out(j)
+
+            # compute hessian
+            h = j_po.T.dot(j)
+
+            # compute symmetric esm parameter updates
+            dp = self.interface.solve(h, j_po, e, prior)
+
+            # update transform
+            target = self.transform.target
+            dt = self.transform.from_vector(dp[:n_shape_params])
+            dt.from_vector_inplace(dt.as_vector() + dp[n_shape_params:])
+            self.transform.from_vector_inplace(
+                self.transform.as_vector() + dt.as_vector())
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            error = np.abs(np.linalg.norm(
+                target.points - self.transform.target.points))
+            if error < self.eps:
+                break
+
+            # save cost
+            cost.append(e.T.dot(self.project_out(e)))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(image, shape_parameters, cost,
+                                               gt_shape=gt_shape)
+
+
+class PIC_N(ProjectOut):
+    r"""
+    Project-Out Inverse Compositional Newton algorithm
+    """
     def _precompute(self):
 
         # compute model gradient
@@ -517,10 +726,10 @@ class PICN(ProjectOut):
             shape_parameters.append(self.transform.as_vector())
 
             # test convergence
-            # error = np.abs(np.linalg.norm(
-            #     target.points - self.transform.target.points))
-            # if error < self.eps:
-            #     break
+            error = np.abs(np.linalg.norm(
+                target.points - self.transform.target.points))
+            if error < self.eps:
+                break
 
             # save cost
             cost.append(e.T.dot(e_po))
@@ -530,77 +739,10 @@ class PICN(ProjectOut):
                                                gt_shape=gt_shape)
 
 
-class PFC(ProjectOut):
+class PFC_N(ProjectOut):
     r"""
-    Project-Out Forward Compositional Gauss-Newton Algorithm
+    Project-Out Forward Compositional Newton algorithm
     """
-
-    def _precompute(self):
-
-        # compute warp jacobian
-        self._dw_dp = self.interface.dw_dp()
-
-    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
-            prior=False):
-
-        # initialize cost
-        cost = []
-        # initialize transform
-        self.transform.set_target(initial_shape)
-        shape_parameters = [self.transform.as_vector()]
-        # masked model mean
-        masked_m = self.appearance_model.mean().as_vector()[
-            self.interface.image_vec_mask]
-
-        for _ in xrange(max_iters):
-
-            # compute warped image with current weights
-            i = self.interface.warp(image)
-
-            # reconstruct appearance
-            masked_i = i.as_vector()[self.interface.image_vec_mask]
-
-            # compute error image
-            e = masked_m - masked_i
-
-            # compute image gradient
-            nabla_i = self.interface.gradient(i)
-
-            # compute model jacobian
-            j = self.interface.steepest_descent_images(nabla_i, self._dw_dp)
-            # project out appearance model from model jacobian
-            j_po = self.project_out(j)
-
-            # compute hessian
-            h = j_po.T.dot(j)
-
-            # compute gauss-newton parameter updates
-            dp = self.interface.solve(h, j_po, e, prior)
-
-            # update transform
-            target = self.transform.target
-            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
-            shape_parameters.append(self.transform.as_vector())
-
-            # test convergence
-            # error = np.abs(np.linalg.norm(
-            #     target.points - self.transform.target.points))
-            # if error < self.eps:
-            #     break
-
-            # save cost
-            cost.append(e.T.dot(self.project_out(e)))
-
-        # return aam algorithm result
-        return self.interface.algorithm_result(image, shape_parameters, cost,
-                                               gt_shape=gt_shape)
-
-
-class PFCN(ProjectOut):
-    r"""
-    Project-Out Forward Compositional Newton Algorithm
-    """
-
     def _precompute(self):
 
         # compute warp jacobian
@@ -656,10 +798,10 @@ class PFCN(ProjectOut):
             shape_parameters.append(self.transform.as_vector())
 
             # test convergence
-            # error = np.abs(np.linalg.norm(
-            #     target.points - self.transform.target.points))
-            # if error < self.eps:
-            #     break
+            error = np.abs(np.linalg.norm(
+                target.points - self.transform.target.points))
+            if error < self.eps:
+                break
 
             # save cost
             cost.append(e.T.dot(e_po))
@@ -669,15 +811,608 @@ class PFCN(ProjectOut):
                                                gt_shape=gt_shape)
 
 
-class PSC(ProjectOut):
-    r"""
-    Project-Out Symmetric Compositional ESM Algorithm
-    """
+# Simultaneous Compositional Algorithms ----------------------------------
 
+class Simultaneous(AAMAlgorithm):
+
+    def __init__(self, aam_interface, appearance_model, transform,
+                 eps=10**-5, **kwargs):
+        # call super constructor
+        super(Simultaneous, self).__init__(
+            aam_interface, appearance_model, transform, eps, **kwargs)
+
+        # pre-compute
+        self.precompute()
+
+    def precompute(self):
+        r"""
+        Pre-compute common state for all Simultaneous AAM algorithms
+        """
+        # call super method
+        super(Simultaneous, self).precompute()
+
+        # grab number of appearance parameters
+        self.m = self.appearance_model.n_active_components
+
+        # grab appearance model components
+        self.A = self.appearance_model.components
+        # mask them
+        self.A_m = self.A[self.interface.image_vec_mask, :]
+        # compute their pseudoinverse
+        self.pinv_A_m = np.linalg.pinv(self.A_m)
+
+        # grab appearance model mean
+        self.a_bar = self.appearance_model.mean().as_vector()
+        # masked it
+        self.a_bar_m = self.a_bar[self.interface.image_vec_mask]
+
+        # compute warp jacobian
+        self.dW_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            map_inference=False):
+        r"""
+        Run Simultaneous AAM algorithms
+        """
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        p_list = [self.transform.as_vector()]
+
+        # initialize iteration counter and epsilon
+        k = 0
+        eps = np.Inf
+
+        # Compositional Gauss-Newton loop
+        while k < max_iters and eps > self.eps:
+            # warp image
+            self.i = self.interface.warp(image)
+            # mask warped image
+            i_m = self.i.as_vector()[self.interface.image_vec_mask]
+
+            if k == 0:
+                # initialize appearance parameters by projecting masked image
+                # onto masked appearance model
+                c = self.pinv_A_m.T.dot(i_m - self.a_bar_m)
+                self.a = self.a_bar + self.A.dot(c)
+                a_m = self.a[self.interface.image_vec_mask]
+                c_list = [c]
+
+            # compute masked error
+            e_m = a_m - i_m
+
+            # compute masked  Jacobian
+            J_m = self.compute_jacobian()
+            # assemble masked simultaneous Jacobian
+            J_sim_m = np.hstack((self.A_m, J_m))
+            # compute masked Hessian
+            H_sim_m = J_sim_m.dot(J_sim_m)
+
+            # compute Gauss-Newton parameter update
+            dq = self.interface.solve(H_sim_m, J_sim_m, e_m, map_inference)
+
+            # update appearance parameters
+            dc = dq[:self.m]
+            self.a += self.A.dot(dc)
+            a_m = self.a[self.interface.image_vec_mask]
+            c += dc
+            c_list.append(c)
+
+            # update warp
+            self.dp = dq[self.m:]
+            s_k = self.transform.target
+            self.update_warp()
+            p_list.append(self.transform.as_vector())
+
+            # test convergence
+            eps = np.abs(np.linalg.norm(s_k - self.transform.target.points))
+
+        # return algorithm result
+        return self.interface.algorithm_result(
+            image, p_list, appearance_parameters=c_list, gt_shape=gt_shape)
+
+    @abc.abstractmethod
+    def compute_jacobian(self):
+        r"""
+        Compute Jacobian
+        """
+        pass
+
+    @abc.abstractmethod
+    def update_warp(self):
+        r"""
+        Update warp
+        """
+        pass
+
+
+class SFC(Simultaneous):
+    r"""
+    Simultaneous Forward Compositional Gauss-Newton algorithm
+    """
+    def compute_jacobian(self):
+        r"""
+        Compute Forward Jacobian
+        """
+        # compute warped image gradient
+        nabla_i = self.interface.gradient(self.i)
+        # return forward Jacobian
+        return self.interface.steepest_descent_images(nabla_i, self.dW_dp)
+
+
+class SIC(Simultaneous):
+    r"""
+    Simultaneous Inverse Compositional Gauss-Newton algorithm
+    """
+    def compute_jacobian(self):
+        r"""
+        Compute InverseJacobian
+        """
+        # compute warped appearance model gradient
+        nabla_a = self.interface.gradient(self.a)
+        # return inverse Jacobian
+        return self.interface.steepest_descent_images(nabla_a, self.dW_dp)
+
+
+class SAC(Simultaneous):
+    r"""
+    Simultaneous Asymmetric Compositional Gauss-Newton algorithm
+    """
+    def compute_jacobian(self):
+        r"""
+        Compute Asymmetric Jacobian
+        """
+        # compute warped image gradient
+        nabla_i = self.interface.gradient(self.i)
+        # compute appearance model gradient
+        nabla_a = self.interface.gradient(self.a)
+        # combine gradients
+        nabla = self.a * nabla_i + (1 - self.a) * nabla_a
+        # return asymmetric Jacobian
+        return self.interface.steepest_descent_images(nabla, self.dW_dp)
+
+    def update_warp(self):
+        r"""
+        Update warp based on Asymmetric Composition
+        """
+        dt = self.transform.from_vector(self.a * self.dp)
+        dt.from_vector_inplace(dt.as_vector() + (1 - self.a) * self.dp)
+        self.transform.from_vector_inplace(
+            self.transform.as_vector() + dt.as_vector())
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            map_inference=False, a=0.5):
+        r"""
+        Run Asymmetric Simultaneous algorithms
+        """
+        # set alpha value
+        self.a = a
+        # call super method
+        return super(SAC, self).run(
+            image, initial_shape, gt_shape=None, max_iters=20,
+            map_inference=False)
+
+
+class SBC(Simultaneous):
+    r"""
+    Simultaneous Bidirectional Compositional Gauss-Newton algorithm
+    """
+    def compute_jacobian(self):
+        r"""
+        Compute Bidirectional Jacobian
+        """
+        # compute warped image gradient
+        nabla_i = self.interface.gradient(self.i)
+        # compute appearance model gradient
+        nabla_a = self.interface.gradient(self.a)
+        # compute forward Jacobian
+        J_f = self.interface.steepest_descent_images(nabla_i, self.dW_dp)
+        # compute inverse Jacobian
+        J_i = self.interface.steepest_descent_images(nabla_a, self.dW_dp)
+        # return bidirectional Jacobian
+        return np.hstack((J_f, J_i))
+
+    def update_warp(self):
+        r"""
+        Update warp based on Bidirectional Composition
+        """
+        dt = self.transform.from_vector(self.a * self.dp[:self.n])
+        dt.from_vector_inplace(dt.as_vector() + self.b * self.dp[:self.n])
+        self.transform.from_vector_inplace(
+            self.transform.as_vector() + dt.as_vector())
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            map_inference=False, a=1.0, b=1.0):
+        r"""
+        Run Bidirectional Simultaneous algorithms
+        """
+        # set alpha and beta values
+        self.a, self.b = a, b
+        # call super method
+        return super(SBC, self).run(
+            image, initial_shape, gt_shape=None, max_iters=20,
+            map_inference=False)
+
+
+class SIC_N(Simultaneous):
+    r"""
+    Simultaneous Inverse Compositional Newton algorithm
+    """
     def _precompute(self):
 
-        # compute model gradient
-        self._nabla_t = self.interface.gradient(self.template)
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+        # compute U jacobian
+        n_pixels = len(self.template.as_vector()[
+            self.interface.image_vec_mask])
+        self._j_U = np.zeros((self.appearance_model.n_active_components,
+                              n_pixels, self.transform.n_parameters))
+        for k, u in enumerate(self._U.T):
+            self.template2.from_vector_inplace(u)
+            nabla_u = self.interface.gradient(self.template2)
+            j_u = self.interface.steepest_descent_images(nabla_u, self._dw_dp)
+            self._j_U[k, ...] = j_u
+
+        # compute U inverse hessian
+        self._inv_h_U = np.linalg.inv(self._masked_U.T.dot(self._masked_U))
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # warp image
+            i = self.interface.warp(image)
+            # mask image
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            if _ == 0:
+                # project image onto the model bases
+                c = self._pinv_U.T.dot(masked_i - masked_m)
+            else:
+                # compute gauss-newton appearance parameters updates
+                masked_e = (masked_i -
+                            self.template.as_vector()[
+                                self.interface.image_vec_mask])
+                dc = (self._pinv_U.T.dot(masked_e - j.dot(dp)) -
+                      masked_e.dot(self._j_U).dot(dp))
+                c += dc
+
+            # reconstruct appearance
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = masked_i - masked_m
+
+            # compute model gradient
+            nabla_t = self.interface.gradient(self.template)
+            # compute model second order gradient
+            nabla2_t = self.interface.gradient(Image(nabla_t))
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
+            # project out appearance model from model jacobian
+            j_po = self.project_out(j)
+
+            # compute gauss-newton hessian
+            h_gn = j_po.T.dot(j)
+            # compute partial newton hessian
+            h_pn = self.interface.partial_newton_hessian(nabla2_t, self._dw_dp)
+            # project out appearance model from error
+            e_po = self.project_out(e)
+            # compute cp hessian
+            h_cp = self._pinv_U.T.dot(j_po) + e_po.dot(self._j_U)
+
+            # compute full newton hessian
+            h = (e_po.dot(h_pn).reshape(h_gn.shape) + h_gn -
+                 h_cp.T.dot(self._inv_h_U.dot(h_cp)))
+            # compute full newton jacobian
+            j = - j_po + self._pinv_U.dot(h_cp)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class SFC_N(Simultaneous):
+    r"""
+    Simultaneous Forward Compositional Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+        # compute U jacobian
+        n_pixels = len(self.template.as_vector()[
+            self.interface.image_vec_mask])
+        self._j_U = np.zeros((self.appearance_model.n_active_components,
+                              n_pixels, self.transform.n_parameters))
+        for k, u in enumerate(self._U.T):
+            nabla_u = self.interface.gradient(Image(u.reshape(
+                self.template.pixels.shape)))
+            j_u = self.interface.steepest_descent_images(nabla_u, self._dw_dp)
+            self._j_U[k, ...] = j_u
+
+        # compute U inverse hessian
+        self._inv_h_U = np.linalg.inv(self._masked_U.T.dot(self._masked_U))
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # warp image
+            i = self.interface.warp(image)
+            # mask image
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            if _ == 0:
+                # project image onto the model bases
+                c = self._pinv_U.T.dot(masked_i - masked_m)
+            else:
+                # compute gauss-newton appearance parameters updates
+                masked_e = (masked_i -
+                            self.template.as_vector()[
+                                self.interface.image_vec_mask])
+                dc = (self._pinv_U.T.dot(masked_e - j.dot(dp)) -
+                      masked_e.dot(self._j_U).dot(dp))
+                c += dc
+
+            # reconstruct appearance
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = masked_i - masked_m
+
+            # compute model gradient
+            nabla_i = self.interface.gradient(i)
+            # compute model second order gradient
+            nabla2_i = self.interface.gradient(Image(nabla_i))
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_i, self._dw_dp)
+            # project out appearance model from model jacobian
+            j_po = self.project_out(j)
+
+            # compute gauss-newton hessian
+            h_gn = j_po.T.dot(j)
+            # compute partial newton hessian
+            h_pn = self.interface.partial_newton_hessian(nabla2_i, self._dw_dp)
+            # project out appearance model from error
+            e_po = self.project_out(e)
+            # compute cp hessian
+            h_cp = self._pinv_U.T.dot(j_po) + e_po.dot(self._j_U)
+
+            # compute full newton hessian
+            h = (e_po.dot(h_pn).reshape(h_gn.shape) + h_gn -
+                 h_cp.T.dot(self._inv_h_U.dot(h_cp)))
+            # compute full newton jacobian
+            j = - j_po + self._pinv_U.dot(h_cp)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+# Alternating Compositional Algorithms ----------------------------------------
+
+class AIC(Alternating):
+    r"""
+    Alternating Inverse Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # warp image
+            i = self.interface.warp(image)
+            # mask image
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            # reconstruct appearance
+            c = self._pinv_U.T.dot(masked_i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = (self.template.as_vector()[self.interface.image_vec_mask] -
+                 masked_i)
+
+            # compute model gradient
+            nabla_t = self.interface.gradient(self.template)
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
+
+            # compute hessian
+            h = j.T.dot(j)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class AFC(Alternating):
+    r"""
+    Alternating Forward Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # warp image
+            i = self.interface.warp(image)
+
+            # reconstruct appearance
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+            c = self._pinv_U.T.dot(masked_i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = (self.template.as_vector()[self.interface.image_vec_mask] -
+                 masked_i)
+
+            # compute model gradient
+            nabla_i = self.interface.gradient(i)
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_i, self._dw_dp)
+
+            # compute hessian
+            h = j.T.dot(j)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            dt = self.transform.from_vector(dp)
+            self.transform.from_vector_inplace(
+                self.transform.as_vector() + dt.as_vector())
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class AAC(Alternating):
+    r"""
+    Alternating Asymmetric Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
 
         # compute warp jacobian
         self._dw_dp = self.interface.dw_dp()
@@ -690,9 +1425,12 @@ class PSC(ProjectOut):
         # initialize transform
         self.transform.set_target(initial_shape)
         shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
         # masked model mean
-        masked_m = self.appearance_model.mean().as_vector()[
-            self.interface.image_vec_mask]
+        masked_m = m[self.interface.image_vec_mask]
 
         for _ in xrange(max_iters):
 
@@ -701,23 +1439,27 @@ class PSC(ProjectOut):
 
             # reconstruct appearance
             masked_i = i.as_vector()[self.interface.image_vec_mask]
+            c = self._pinv_U.T.dot(masked_i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
 
             # compute error image
-            e = masked_m - masked_i
+            e = (self.template.as_vector()[self.interface.image_vec_mask] -
+                 masked_i)
 
             # combine image and model gradient
-            nabla = a * self.interface.gradient(i) + (1-a) * self._nabla_t
+            nabla = (a * self.interface.gradient(i) +
+                     (1-a) * self.interface.gradient(self.template))
 
             # compute model jacobian
             j = self.interface.steepest_descent_images(nabla, self._dw_dp)
-            # project out appearance model from model jacobian
-            j_po = self.project_out(j)
 
             # compute hessian
-            h = j_po.T.dot(j)
+            h = j.T.dot(j)
 
             # compute symmetric esm parameter updates
-            dp = self.interface.solve(h, j_po, e, prior)
+            dp = self.interface.solve(h, j, e, prior)
 
             # update transform
             target = self.transform.target
@@ -734,22 +1476,19 @@ class PSC(ProjectOut):
             #     break
 
             # save cost
-            cost.append(e.T.dot(self.project_out(e)))
+            cost.append(e.T.dot(e))
 
         # return aam algorithm result
-        return self.interface.algorithm_result(image, shape_parameters, cost,
-                                               gt_shape=gt_shape)
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
 
 
-class PBC(ProjectOut):
+class ABC(Alternating):
     r"""
-    Project-Out Bidirectional Compositional ESM Algorithm
+    Alternating Bidirectional Compositional Gauss-Newton algorithm
     """
-
     def _precompute(self):
-
-        # compute model gradient
-        self._nabla_t = self.interface.gradient(self.template)
 
         # compute warp jacobian
         self._dw_dp = self.interface.dw_dp()
@@ -763,9 +1502,12 @@ class PBC(ProjectOut):
         self.transform.set_target(initial_shape)
         shape_parameters = [self.transform.as_vector()]
         n_shape_params = self.transform.n_parameters
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
         # masked model mean
-        masked_m = self.appearance_model.mean().as_vector()[
-            self.interface.image_vec_mask]
+        masked_m = m[self.interface.image_vec_mask]
 
         for _ in xrange(max_iters):
 
@@ -774,26 +1516,30 @@ class PBC(ProjectOut):
 
             # reconstruct appearance
             masked_i = i.as_vector()[self.interface.image_vec_mask]
+            c = self._pinv_U.T.dot(masked_i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
 
             # compute error image
-            e = masked_m - masked_i
+            e = (self.template.as_vector()[self.interface.image_vec_mask] -
+                 masked_i)
 
-            # compute image gradient
+            # combine image and model gradient
             nabla_i = self.interface.gradient(i)
+            nabla_t = self.interface.gradient(self.template)
 
+            # compute model jacobian
             # compute jacobian
             j_i = self.interface.steepest_descent_images(nabla_i, self._dw_dp)
-            j_t = self.interface.steepest_descent_images(self._nabla_t,
-                                                         self._dw_dp)
+            j_t = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
             j = np.hstack((j_i, j_t))
-            # project out appearance model from  jacobian
-            j_po = self.project_out(j)
 
             # compute hessian
-            h = j_po.T.dot(j)
+            h = j.T.dot(j)
 
             # compute symmetric esm parameter updates
-            dp = self.interface.solve(h, j_po, e, prior)
+            dp = self.interface.solve(h, j, e, prior)
 
             # update transform
             target = self.transform.target
@@ -810,16 +1556,788 @@ class PBC(ProjectOut):
             #     break
 
             # save cost
-            cost.append(e.T.dot(self.project_out(e)))
+            cost.append(e.T.dot(e))
 
         # return aam algorithm result
-        return self.interface.algorithm_result(image, shape_parameters, cost,
-                                               gt_shape=gt_shape)
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class AIC_N(Alternating):
+    r"""
+    Alternating Inverse Compositional Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # compute warped image with current weights
+            i = self.interface.warp(image)
+
+            # reconstruct appearance
+            i = i.as_vector()[self.interface.image_vec_mask]
+            c = self._pinv_U.T.dot(i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = self.template.as_vector()[self.interface.image_vec_mask] - i
+
+            # compute model gradient
+            nabla_t = self.interface.gradient(self.template)
+            # compute model second order gradient
+            nabla2_t = self.interface.gradient(Image(nabla_t))
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
+
+            # compute gauss-newton hessian
+            h_gn = j.T.dot(j)
+            # compute partial newton hessian
+            h_pn = self.interface.partial_newton_hessian(nabla2_t, self._dw_dp)
+            # compute full newton hessian
+            h = e.dot(h_pn).reshape(h_gn.shape) + h_gn
+
+            # compute newton parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class AFC_N(Alternating):
+    r"""
+    Alternating Forward Compositional Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # compute warped image with current weights
+            i = self.interface.warp(image)
+
+            # reconstruct appearance
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+            c = self._pinv_U.T.dot(masked_i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = (self.template.as_vector()[self.interface.image_vec_mask] -
+                 masked_i)
+
+            # compute model gradient
+            nabla_i = self.interface.gradient(i)
+            # compute model second order gradient
+            nabla2_i = self.interface.gradient(Image(nabla_i))
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_i, self._dw_dp)
+
+            # compute gauss-newton hessian
+            h_gn = j.T.dot(j)
+            # compute partial newton hessian
+            h_pn = self.interface.partial_newton_hessian(nabla2_i, self._dw_dp)
+            # compute full newton hessian
+            h = e.dot(h_pn).reshape(h_gn.shape) + h_gn
+
+            # compute newton parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+# Modified Alternating Compositional Algorithms -------------------------------
+
+class MAIC(Alternating):
+    r"""
+    Modified Alternating Inverse Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # warp image
+            i = self.interface.warp(image)
+            # mask image
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            # reconstruct appearance
+            c = self._pinv_U.T.dot(masked_i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = (self.template.as_vector()[self.interface.image_vec_mask] -
+                 masked_i)
+
+            # compute model gradient
+            nabla_t = self.interface.gradient(self.template)
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
+
+            # compute hessian
+            h = j.T.dot(j)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class MAAC(Alternating):
+    r"""
+    Modified Alternating Asymmetric Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False, a=0.5):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # compute warped image with current weights
+            i = self.interface.warp(image)
+
+            # reconstruct appearance
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+            c = self._pinv_U.T.dot(masked_i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = (self.template.as_vector()[self.interface.image_vec_mask] -
+                 masked_i)
+
+            # combine image and model gradient
+            nabla = (a * self.interface.gradient(i) +
+                     (1-a) * self.interface.gradient(self.template))
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla, self._dw_dp)
+
+            # compute hessian
+            h = j.T.dot(j)
+
+            # compute symmetric esm parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            dt = self.transform.from_vector(a * dp)
+            dt.from_vector_inplace(dt.as_vector() + (1-a) * dp)
+            self.transform.from_vector_inplace(
+                self.transform.as_vector() + dt.as_vector())
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class MABC(Alternating):
+    r"""
+    Modified Alternating Bidirectional Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        n_shape_params = self.transform.n_parameters
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters):
+
+            # compute warped image with current weights
+            i = self.interface.warp(image)
+
+            # reconstruct appearance
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+            c = self._pinv_U.T.dot(masked_i - masked_m)
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = (self.template.as_vector()[self.interface.image_vec_mask] -
+                 masked_i)
+
+            # combine image and model gradient
+            nabla_i = self.interface.gradient(i)
+            nabla_t = self.interface.gradient(self.template)
+
+            # compute model jacobian
+            # compute jacobian
+            j_i = self.interface.steepest_descent_images(nabla_i, self._dw_dp)
+            j_t = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
+            j = np.hstack((j_i, j_t))
+
+            # compute hessian
+            h = j.T.dot(j)
+
+            # compute symmetric esm parameter updates
+            dp = self.interface.solve(h, j, e, prior)
+
+            # update transform
+            target = self.transform.target
+            dt = self.transform.from_vector(dp[:n_shape_params])
+            dt.from_vector_inplace(dt.as_vector() + dp[n_shape_params:])
+            self.transform.from_vector_inplace(
+                self.transform.as_vector() + dt.as_vector())
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+            # save cost
+            cost.append(e.T.dot(e))
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+# True Alternating Compositional Algorithms -----------------------------------
+
+class TAIC(Simultaneous):
+    r"""
+    True Alternating Inverse Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+        # compute U jacobian
+        n_true_pixels = self.template.n_true_pixels()
+        n_channels = self.template.n_channels
+        self._nabla_U = np.zeros((self.appearance_model.n_active_components,
+                                  2, n_channels, n_true_pixels))
+        for k, u in enumerate(self._U.T):
+            self.template2.from_vector_inplace(u)
+            nabla_u = self.interface.gradient(self.template2)
+            nabla_u = nabla_u[self.interface.gradient_mask].reshape(
+                nabla_u.shape[:2] + (-1,))
+            self._nabla_U[k, ...] = nabla_u
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters+1):
+
+            # warp image
+            i = self.interface.warp(image)
+            # mask image
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            if _ == 0:
+                # project image onto the model bases
+                c = self._pinv_U.T.dot(masked_i - masked_m)
+            else:
+                # compute gauss-newton appearance parameters updates
+                masked_t = self.template.as_vector()[
+                    self.interface.image_vec_mask]
+
+                G = 0
+                a = (self._nabla_U[None, ...] *
+                     self._dw_dp.dot(dp)[:, None, ...])
+                for ind, d in enumerate(a):
+                    G += d[:, ind]
+                G = G.reshape((G.shape[0], -1))
+
+                A_hat = self._masked_U + G.T
+                dc = np.linalg.pinv(A_hat).dot(masked_i - masked_t + j.dot(dp))
+                c += dc
+
+            # reconstruct appearance
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = masked_m - masked_i
+
+            # compute and save cost
+            r = t[self.interface.image_vec_mask] - masked_i
+            cost.append(r.dot(r))
+
+            if _ == max_iters:
+                break
+
+            # compute model gradient
+            nabla_t = self.interface.gradient(self.template)
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
+            # project out appearance model from model jacobian
+            j_po = self.project_out(j)
+
+            # compute hessian
+            h = j_po.T.dot(j)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j_po, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class TAAC(Simultaneous):
+    r"""
+    True Alternating Asymmetric Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+        # compute U jacobian
+        n_true_pixels = self.template.n_true_pixels()
+        n_channels = self.template.n_channels
+        self._nabla_U = np.zeros((self.appearance_model.n_active_components,
+                                  2, n_channels, n_true_pixels))
+        for k, u in enumerate(self._U.T):
+            self.template2.from_vector_inplace(u)
+            nabla_u = self.interface.gradient(self.template2)
+            nabla_u = nabla_u[self.interface.gradient_mask].reshape(
+                nabla_u.shape[:2] + (-1,))
+            self._nabla_U[k, ...] = nabla_u
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters+1):
+
+            # warp image
+            i = self.interface.warp(image)
+            # mask image
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            if _ == 0:
+                # project image onto the model bases
+                c = self._pinv_U.T.dot(masked_i - masked_m)
+            else:
+                # compute gauss-newton appearance parameters updates
+                masked_t = self.template.as_vector()[
+                    self.interface.image_vec_mask]
+
+                G = 0
+                a = (self._nabla_U[None, ...] *
+                     self._dw_dp.dot(dp)[:, None, ...])
+                for ind, d in enumerate(a):
+                    G += d[:, ind]
+                G = G.reshape((G.shape[0], -1))
+
+                A_hat = self._masked_U + G.T
+                dc = np.linalg.pinv(A_hat).dot(masked_i - masked_t + j.dot(dp))
+                c += dc
+
+            # reconstruct appearance
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = masked_m - masked_i
+
+            # compute and save cost
+            r = t[self.interface.image_vec_mask] - masked_i
+            cost.append(r.dot(r))
+
+            if _ == max_iters:
+                break
+
+            # compute model gradient
+            nabla_t = self.interface.gradient(self.template)
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
+            # project out appearance model from model jacobian
+            j_po = self.project_out(j)
+
+            # compute hessian
+            h = j_po.T.dot(j)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j_po, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+class TABC(Simultaneous):
+    r"""
+    Modified Alternating Bidirectional Compositional Gauss-Newton algorithm
+    """
+    def _precompute(self):
+
+        # compute warp jacobian
+        self._dw_dp = self.interface.dw_dp()
+
+        # compute U jacobian
+        n_true_pixels = self.template.n_true_pixels()
+        n_channels = self.template.n_channels
+        self._nabla_U = np.zeros((self.appearance_model.n_active_components,
+                                  2, n_channels, n_true_pixels))
+        for k, u in enumerate(self._U.T):
+            self.template2.from_vector_inplace(u)
+            nabla_u = self.interface.gradient(self.template2)
+            nabla_u = nabla_u[self.interface.gradient_mask].reshape(
+                nabla_u.shape[:2] + (-1,))
+            self._nabla_U[k, ...] = nabla_u
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            prior=False):
+
+        # initialize cost
+        cost = []
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        shape_parameters = [self.transform.as_vector()]
+        # initial appearance parameters
+        appearance_parameters = [0]
+        # model mean
+        m = self.appearance_model.mean().as_vector()
+        # masked model mean
+        masked_m = m[self.interface.image_vec_mask]
+
+        for _ in xrange(max_iters+1):
+
+            # warp image
+            i = self.interface.warp(image)
+            # mask image
+            masked_i = i.as_vector()[self.interface.image_vec_mask]
+
+            if _ == 0:
+                # project image onto the model bases
+                c = self._pinv_U.T.dot(masked_i - masked_m)
+            else:
+                # compute gauss-newton appearance parameters updates
+                masked_t = self.template.as_vector()[
+                    self.interface.image_vec_mask]
+
+                G = 0
+                a = (self._nabla_U[None, ...] *
+                     self._dw_dp.dot(dp)[:, None, ...])
+                for ind, d in enumerate(a):
+                    G += d[:, ind]
+                G = G.reshape((G.shape[0], -1))
+
+                A_hat = self._masked_U + G.T
+                dc = np.linalg.pinv(A_hat).dot(masked_i - masked_t + j.dot(dp))
+                c += dc
+
+            # reconstruct appearance
+            t = self._U.dot(c) + m
+            self.template.from_vector_inplace(t)
+            appearance_parameters.append(c)
+
+            # compute error image
+            e = masked_m - masked_i
+
+            # compute and save cost
+            r = t[self.interface.image_vec_mask] - masked_i
+            cost.append(r.dot(r))
+
+            if _ == max_iters:
+                break
+
+            # compute model gradient
+            nabla_t = self.interface.gradient(self.template)
+
+            # compute model jacobian
+            j = self.interface.steepest_descent_images(nabla_t, self._dw_dp)
+            # project out appearance model from model jacobian
+            j_po = self.project_out(j)
+
+            # compute hessian
+            h = j_po.T.dot(j)
+
+            # compute gauss-newton parameter updates
+            dp = self.interface.solve(h, j_po, e, prior)
+
+            # update transform
+            target = self.transform.target
+            self.transform.from_vector_inplace(self.transform.as_vector() + dp)
+            shape_parameters.append(self.transform.as_vector())
+
+            # test convergence
+            # error = np.abs(np.linalg.norm(
+            #     target.points - self.transform.target.points))
+            # if error < self.eps:
+            #     break
+
+        # return aam algorithm result
+        return self.interface.algorithm_result(
+            image, shape_parameters, cost,
+            appearance_parameters=appearance_parameters, gt_shape=gt_shape)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # Simultaneous Compositional Algorithms ----------------------------------
 
-class SIC(Simultaneous):
+class SIC2(Simultaneous):
     r"""
     Fast Simultaneous Inverse Compositional Gauss-Newton Algorithm
     """
@@ -1308,7 +2826,7 @@ class SSC(Simultaneous):
             appearance_parameters=appearance_parameters, gt_shape=gt_shape)
 
 
-class SBC(Simultaneous):
+class SBC2(Simultaneous):
 
     def _precompute(self):
 
