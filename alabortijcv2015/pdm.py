@@ -16,8 +16,8 @@ class PDM(ModelInstance, DP):
         self._set_prior(sigma2)
 
     def _set_prior(self, sigma2):
-        self.j_prior = sigma2 / self.model.eigenvalues
-        self.h_prior = np.diag(self.j_prior)
+        self.J_prior = sigma2 / self.model.eigenvalues
+        self.H_prior = np.diag(self.J_prior)
 
     @property
     def n_dims(self):
@@ -64,8 +64,8 @@ class GlobalPDM(PDM):
     def _set_prior(self, sigma2):
         sim_prior = np.ones((4,))
         pdm_prior = sigma2 / self.model.eigenvalues
-        self.j_prior = np.hstack((sim_prior, pdm_prior))
-        self.h_prior = np.diag(self.j_prior)
+        self.J_prior = np.hstack((sim_prior, pdm_prior))
+        self.H_prior = np.diag(self.J_prior)
 
     @property
     def n_global_parameters(self):

@@ -179,8 +179,9 @@ class ModelDrivenTransform(Transform, Targetable, Vectorizable, DP):
 
         return dW_dp
 
-    def jp(self):
+    def Jp(self):
         r"""
+        Compute parameters Jacobian
 
         References
         ----------
@@ -220,12 +221,12 @@ class ModelDrivenTransform(Transform, Targetable, Vectorizable, DP):
         return Jp
 
     @property
-    def j_prior(self):
-        return self.pdm.j_prior
+    def J_prior(self):
+        return self.pdm.J_prior
 
     @property
-    def h_prior(self):
-        return self.pdm.h_prior
+    def H_prior(self):
+        return self.pdm.H_prior
 
 
 class GlobalMDTransform(ModelDrivenTransform):
@@ -276,22 +277,9 @@ class GlobalMDTransform(ModelDrivenTransform):
         self._cached_points = None
         self.transform = transform_cls(source, self.target)
 
-    def jp(self):
+    def Jp(self):
         r"""
-        Composes two ModelDrivenTransforms together based on the
-        first order approximation proposed by Papandreou and Maragos in [1].
-
-        Parameters
-        ----------
-        delta : (N,) ndarray
-            Vectorized :class:`ModelDrivenTransform` to be applied **before**
-            self
-
-        Returns
-        --------
-        transform : self
-            self, updated to the result of the composition
-
+        Compute parameters Jacobian
 
         References
         ----------

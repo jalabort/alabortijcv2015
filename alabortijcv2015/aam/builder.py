@@ -252,7 +252,7 @@ class GlobalAAMBuilder(AAMBuilder):
 
 class PatchAAMBuilder(AAMBuilder):
 
-    def __init__(self, patch_shape=(16, 16), features=None,
+    def __init__(self, patch_shape=(17, 17), features=None,
                  diagonal=None, sigma=None, scales=(1, .5), scale_shapes=True,
                  scale_features=True, max_shape_components=None,
                  max_appearance_components=None, boundary=3):
@@ -377,7 +377,7 @@ class LinearGlobalAAMBuilder(GlobalAAMBuilder):
 
 class LinearPatchAAMBuilder(PatchAAMBuilder):
 
-    def __init__(self, patch_shape=(16, 16), features=None,
+    def __init__(self, patch_shape=(17, 17), features=None,
                  diagonal=None, sigma=None, scales=(1, .5), scale_shapes=False,
                  scale_features=True, max_shape_components=None,
                  max_appearance_components=None, boundary=3):
@@ -453,7 +453,7 @@ class LinearPatchAAMBuilder(PatchAAMBuilder):
 
 class PartsAAMBuilder(AAMBuilder):
 
-    def __init__(self, parts_shape=(16, 16), features=None,
+    def __init__(self, parts_shape=(17, 17), features=None,
                  normalize_parts=False, diagonal=None, sigma=None,
                  scales=(1, .5), scale_shapes=False, scale_features=True,
                  max_shape_components=None, max_appearance_components=None):

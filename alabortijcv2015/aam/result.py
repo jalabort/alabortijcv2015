@@ -8,7 +8,7 @@ from alabortijcv2015.result import (AlgorithmResult, FitterResult,
 
 class AAMAlgorithmResult(AlgorithmResult):
 
-    def __init__(self, image, fitter, shape_parameters, costs,
+    def __init__(self, image, fitter, shape_parameters, costs=0,
                  appearance_parameters=None, gt_shape=None):
         super(AAMAlgorithmResult, self).__init__()
         self.image = image
