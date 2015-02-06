@@ -799,7 +799,7 @@ class Simultaneous(AAMAlgorithm):
         # compute masked  Jacobian
         J_m = self.compute_jacobian()
         # assemble masked simultaneous Jacobian
-        J_sim_m = np.hstack((self.A_m, J_m))
+        J_sim_m = np.hstack((-self.A_m, J_m))
         # compute masked Hessian
         H_sim_m = J_sim_m.T.dot(J_sim_m)
         # solve for increments on the appearance and shape parameters
@@ -1654,6 +1654,8 @@ class ModifiedAlternating(Alternating):
         p_list = [self.transform.as_vector()]
 
         # initialize iteration counter and epsilon
+        a_m = self.a_bar_m
+        c_list = []
         k = 0
         eps = np.Inf
 
@@ -1664,18 +1666,10 @@ class ModifiedAlternating(Alternating):
             # mask warped image
             i_m = self.i.as_vector()[self.interface.i_mask]
 
-            if k == 0:
-                # initialize appearance parameters by projecting masked image
-                # onto masked appearance model
-                c = self.pinv_A_m.dot(i_m - self.a_bar_m)
-                self.a = self.appearance_model.instance(c)
-                a_m = self.a.as_vector()[self.interface.i_mask]
-                c_list = [c]
-            else:
-                c = self.pinv_A_m.dot(i_m - a_m + J_m.dot(self.dp))
-                self.a = self.appearance_model.instance(c)
-                a_m = self.a.as_vector()[self.interface.i_mask]
-                c_list.append(c)
+            c = self.pinv_A_m.dot(i_m - a_m)
+            self.a = self.appearance_model.instance(c)
+            a_m = self.a.as_vector()[self.interface.i_mask]
+            c_list.append(c)
 
             # compute masked error
             e_m = i_m - a_m
@@ -1831,7 +1825,213 @@ class MABC(ModifiedAlternating):
             map_inference=map_inference)
 
 
+# Abstract Interfaces for Alternating Compositional algorithms ---------------
 
+class Wiberg(AAMAlgorithm):
+
+    def __init__(self, aam_interface, appearance_model, transform,
+                 eps=10**-5, **kwargs):
+        # call super constructor
+        super(Wiberg, self).__init__(
+            aam_interface, appearance_model, transform, eps, **kwargs)
+
+        # pre-compute
+        self.precompute()
+
+    def project_out(self, J):
+        r"""
+        Project-out appearance bases from a particular vector or matrix
+        """
+        return J - self.A_m.dot(self.pinv_A_m.dot(J))
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            map_inference=False):
+        r"""
+        Run Alternating AAM algorithms
+        """
+        # initialize transform
+        self.transform.set_target(initial_shape)
+        p_list = [self.transform.as_vector()]
+
+        # initialize iteration counter and epsilon
+        k = 0
+        eps = np.Inf
+
+        # Compositional Gauss-Newton loop
+        while k < max_iters and eps > self.eps:
+            # warp image
+            self.i = self.interface.warp(image)
+            # mask warped image
+            i_m = self.i.as_vector()[self.interface.i_mask]
+
+            if k == 0:
+                # initialize appearance parameters by projecting masked image
+                # onto masked appearance model
+                c = self.pinv_A_m.dot(i_m - self.a_bar_m)
+                self.a = self.appearance_model.instance(c)
+                a_m = self.a.as_vector()[self.interface.i_mask]
+                c_list = [c]
+            else:
+                c = self.pinv_A_m.dot(i_m - a_m + J_m.dot(self.dp))
+                self.a = self.appearance_model.instance(c)
+                a_m = self.a.as_vector()[self.interface.i_mask]
+                c_list.append(c)
+
+            # compute masked error
+            e_m = i_m - self.a_bar_m
+
+            # compute masked  Jacobian
+            J_m = self.compute_jacobian()
+            # project out appearance models
+            QJ_m = self.project_out(J_m)
+            # compute masked Hessian
+            JQJ_m = QJ_m.T.dot(J_m)
+            # solve for increments on the shape parameters
+            if map_inference:
+                self.dp = self.interface.solve_shape_map(
+                    JQJ_m, QJ_m, e_m, self.s2_inv_L,
+                    self.transform.as_vector())
+            else:
+                self.dp = self.interface.solve_shape_ml(JQJ_m, QJ_m, e_m)
+
+            # update warp
+            s_k = self.transform.target.points
+            self.update_warp()
+            p_list.append(self.transform.as_vector())
+
+            # test convergence
+            eps = np.abs(np.linalg.norm(s_k - self.transform.target.points))
+
+            # increase iteration counter
+            k += 1
+
+        # return algorithm result
+        return self.interface.algorithm_result(
+            image, p_list, appearance_parameters=c_list, gt_shape=gt_shape)
+
+
+# Alternating Compositional Algorithms ----------------------------------
+
+class WFC(Wiberg):
+    r"""
+    Simultaneous Forward Compositional Gauss-Newton algorithm
+    """
+    def compute_jacobian(self):
+        r"""
+        Compute Forward Jacobian
+        """
+        # compute warped image gradient
+        nabla_i = self.interface.gradient(self.i)
+        # return forward Jacobian
+        return self.interface.steepest_descent_images(nabla_i, self.dW_dp)
+
+    def update_warp(self):
+        r"""
+        Update warp based on Forward Composition
+        """
+        self.transform.from_vector_inplace(
+            self.transform.as_vector() + self.dp)
+
+
+class WIC(Wiberg):
+    r"""
+    Simultaneous Inverse Compositional Gauss-Newton algorithm
+    """
+    def compute_jacobian(self):
+        r"""
+        Compute Inverse Jacobian
+        """
+        # compute warped appearance model gradient
+        nabla_a = self.interface.gradient(self.a)
+        # return inverse Jacobian
+        return self.interface.steepest_descent_images(-nabla_a, self.dW_dp)
+
+    def update_warp(self):
+        r"""
+        Update warp based on Inverse Composition
+        """
+        self.transform.from_vector_inplace(
+            self.transform.as_vector() - self.dp)
+
+
+class WAC(Wiberg):
+    r"""
+    Simultaneous Asymmetric Compositional Gauss-Newton algorithm
+    """
+    def compute_jacobian(self):
+        r"""
+        Compute Asymmetric Jacobian
+        """
+        # compute warped image gradient
+        nabla_i = self.interface.gradient(self.i)
+        # compute appearance model gradient
+        nabla_a = self.interface.gradient(self.a)
+        # combine gradients
+        nabla = self.alpha * nabla_i + (1 - self.alpha) * nabla_a
+        # return asymmetric Jacobian
+        return self.interface.steepest_descent_images(nabla, self.dW_dp)
+
+    def update_warp(self):
+        r"""
+        Update warp based on Asymmetric Composition
+        """
+        self.transform.from_vector_inplace(
+            self.transform.as_vector() +
+            self.alpha * self.dp +
+            (1 - self.alpha) * self.dp)
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            map_inference=False, alpha=0.5):
+        r"""
+        Run Asymmetric Simultaneous algorithms
+        """
+        # set alpha value
+        self.alpha = alpha
+        # call super method
+        return super(WAC, self).run(
+            image, initial_shape, gt_shape=gt_shape, max_iters=max_iters,
+            map_inference=map_inference)
+
+
+class WBC(Wiberg):
+    r"""
+    Simultaneous Bidirectional Compositional Gauss-Newton algorithm
+    """
+    def compute_jacobian(self):
+        r"""
+        Compute Bidirectional Jacobian
+        """
+        # compute warped image gradient
+        nabla_i = self.interface.gradient(self.i)
+        # compute appearance model gradient
+        nabla_a = self.interface.gradient(self.a)
+        # compute forward Jacobian
+        J_f = self.interface.steepest_descent_images(nabla_i, self.dW_dp)
+        # compute inverse Jacobian
+        J_i = self.interface.steepest_descent_images(-nabla_a, self.dW_dp)
+        # return bidirectional Jacobian
+        return np.hstack((J_f, J_i))
+
+    def update_warp(self):
+        r"""
+        Update warp based on Bidirectional Composition
+        """
+        self.transform.from_vector_inplace(
+            self.transform.as_vector() +
+            self.alpha * self.dp[:self.n] -
+            self.beta * self.dp[self.n:])
+
+    def run(self, image, initial_shape, gt_shape=None, max_iters=20,
+            map_inference=False, alpha=1.0, beta=1.0):
+        r"""
+        Run Bidirectional Simultaneous algorithms
+        """
+        # set alpha and beta values
+        self.alpha, self.beta = alpha, beta
+        # call super method
+        return super(WBC, self).run(
+            image, initial_shape, gt_shape=gt_shape, max_iters=max_iters,
+            map_inference=map_inference)
 
 
 
